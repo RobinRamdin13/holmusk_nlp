@@ -1,27 +1,29 @@
 import re
-import en_core_web_sm
-import spacy
-import medspacy
+import nltk
+import multiprocessing
+# import en_core_web_sm
+# import spacy
+# import medspacy
 import pandas as pd 
 
-from spacy.tokens import doc
-from spacy.language import Language
+from nltk.tokenize import word_tokenize
+nltk.download('punkt')
+from gensim.models import Word2Vec
+# from spacy.tokens import doc
+# from spacy.language import Language
 
+# @Language.component("token_info")
+# def custom_component(document:doc)-> doc:
+#     """Print the number of tokens in each pipeline
 
-# from spacy.tokenizer import Tokenizer
-# from spacy.lang.en import English
-@Language.component("token_info")
-def custom_component(document:doc)-> doc:
-    """Print the number of tokens in each pipeline
+#     Args:
+#         document (spaCy document): sequence of tokens
 
-    Args:
-        document (spaCy document): sequence of tokens
-
-    Returns:
-        spaCy document: sequence of tokens
-    """    
-    print(f"This document contains {len(document)} tokens")
-    return document
+#     Returns:
+#         spaCy document: sequence of tokens
+#     """    
+#     print(f"This document contains {len(document)} tokens")
+#     return document
 
 def preprocess_corpus(x:str)->str:
     """Replace names and extra whitespace
@@ -46,54 +48,55 @@ def preprocess_corpus(x:str)->str:
     x = re.sub(' +', ' ', x) # remove extra whitespace
     return x.lower()
 
-def tokenize_text(text:list):
-    # combine all strings into one
-    text = ' '.join(text)
+def compute_cosine_similarity(model, values):
+    try: 
+        return model.wv.similarity(values['Term1'], values['Term2'])
+    except KeyError as e: 
+        print(e)
+        return None
 
-    # load basic spacy pipeline, exclude all other contents of pipeline
-    basic_spacy = spacy.load('en_core_web_sm', exclude=['tagger', 'parser', 'attribute_ruler', 'lemmatizer', 'ner'])
-    basic_spacy.add_pipe('token_info', name='print_tokens', last=True)
-    # check to ensure only tok2vec is present within pipe, 
-    # print(basic_spacy.pipe_names) 
-
+def main(clinical_notes_path:str, medical_concept_path:str)-> None:
     
-    # load medspacy pipeline, exclude all other contents of pipeline
-    medical_spacy = medspacy.load(medspacy_disable=['medspacy_pyrush', 'medspacy_target_matcher', 'medspacy_context'])
-    medical_spacy.add_pipe('token_info', name='print_tokens', last=True)
-    # note: the medical spacy tokenizer is not visible within the pipeline,
-    # refer to for more information: https://github.com/medspacy/medspacy/blob/master/notebooks/01-Introduction.ipynb
-    # print(medical_spacy.pipe_names)
-
-    # increase text length limit to override limit set by spacy
-    basic_spacy.max_length = 2300000
-    medical_spacy.max_length = 2300000
-
-    # load text into tokenizers
-    basic_token = basic_spacy(text)
-    medical_token = medical_spacy(text)
-
-    basic_token_list = [t.text for t in basic_token]
-    print(basic_token_list)
-    return
-
-def main(data_path:str)-> None:
+    # load clincial notes and medical concepts
+    df = pd.read_csv(clinical_notes_path)
+    df_eval = pd.read_csv(medical_concept_path)
     
-    # load clincial notes
-    df = pd.read_csv(data_path)
+    #### generate text for df_eval and add in the training corpus
     
-    # preprocess clinical notes
+    # preprocess clinical notes and create training corpus
     df['clean_notes'] = df['notes'].apply(lambda x: preprocess_corpus(x))
+    df['tokenize_text'] = df['clean_notes'].apply(lambda x: word_tokenize(x))
+    training_corpus = df['tokenize_text'].values.tolist()
     
-    # tokenize the clean_notes text
-    tokenize_text(df['clean_notes'].values.tolist())
+    # instantiate the number of cores
+    cores =  multiprocessing.cpu_count()
+    
+    # instantiate the word2vec model 
+    model = Word2Vec(sentences=training_corpus,
+                     min_count=5, 
+                     window=2,
+                    #  size=300,
+                     alpha=0.01, 
+                     min_alpha=0.0005,
+                     negative=20,
+                     workers=cores-1)
+    
+    # # instantiate spacy and medspacy pipelines with only tokenizers
+    # basic_spacy = spacy.load('en_core_web_sm', exclude=['tagger', 'parser', 'attribute_ruler', 'lemmatizer', 'ner'])
+    # basic_spacy.add_pipe('token_info', name='print_tokens', last=True)
 
-    # # check token count
-    # token_list = [i.text for i in document]
-    # print(token_list)
+    # medical_spacy = medspacy.load('en_core_web_sm', medspacy_disable=['medspacy_pyrush', 'medspacy_target_matcher', 'medspacy_context'])
+    # medical_spacy.add_pipe('token_info', name='print_tokens', last=True)
+    # # note: the medical spacy tokenizer is not visible within the pipeline,
+    # # refer to for more information: https://github.com/medspacy/medspacy/blob/master/notebooks/01-Introduction.ipynb
     
+    
+    df_eval['model_eval'] = df_eval.apply(lambda x: compute_cosine_similarity(model, x), axis=1)
+    print(df_eval["model_eval"])
+    # print(df_eval.columns)
     return
 
 
 if __name__ == "__main__":
-    data_path = 'data/ClinNotes.csv'
-    main(data_path)
+    clinical_notes_path, medical_concept_path = 'data/ClinNotes.csv', 'data/MedicalConcepts.csv'
+    main(clinical_notes_path, medical_concept_path)
